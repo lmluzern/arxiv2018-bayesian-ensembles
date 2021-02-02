@@ -20,6 +20,10 @@ from bayesian_combination.tagger_wrappers.lstm import LSTM
 from bayesian_combination.annotator_models.spam import SpamAnnotator
 from bayesian_combination.annotator_models.seq import SequentialAnnotator
 
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.metrics import accuracy_score
 
 n_jobs = int(effective_n_jobs() / 2)  # limit the number of parallel jobs. Within each job, numpy can spawn more threads,
 # which can cause the total number of CPUs required to exceed the limit.
@@ -159,7 +163,20 @@ class BC(object):
         else:
             print('Bayesian combination: Did not recognise the annotator model %s' % annotator_model)
 
-    def fit_predict(self, C, doc_start=None, features=None, dev_sentences=[], gold_labels=None):
+    def define_multiclass_nn(self,input_dim,class_num):
+        n_neurons = int((input_dim + class_num) / 2)
+        classifier = Sequential()
+        # Hidden Layer
+        layer0 = Dense(n_neurons, input_dim=input_dim, activation='relu')
+        classifier.add(layer0)
+        # Output Layer
+        layer1 = Dense(class_num,activation='softmax')
+        classifier.add(layer1)
+        # Compiling the neural network
+        classifier.compile(loss='categorical_crossentropy', optimizer='rmsprop', metrics =['accuracy'])
+        return classifier
+
+    def fit_predict(self, C, doc_start=None, features=None, dev_sentences=[], gold_labels=None, input_dim=2, class_num=2, x_train =[], y_train=[], x_val=[], y_val=[], classifier_features=[]):
         """
         Fits the Bayesian combination model to a set of annotations from multiple annotators (e.g.,
          crowdsourced annotations). It then predicts the gold-standard labels for these data points.
@@ -184,6 +201,16 @@ class BC(object):
         :return: posterior distribution over the aggregated labels (array of size LxN), most likely aggregated labels
         (array of size N), probability of the most likely labels (array of size N).
         """
+        classifier = self.define_multiclass_nn(input_dim, class_num)
+
+        monitor = EarlyStopping(monitor='val_loss', min_delta=1e-3, patience=10,
+                                verbose=0, mode='auto', restore_best_weights=True)
+        classifier.fit(x_train, y_train, validation_data=(x_val, y_val), callbacks=[monitor], verbose=0, epochs=100,
+                       batch_size=4)
+        theta_i = classifier.predict(classifier_features)
+        theta_i = np.concatenate((y_train, theta_i[y_train.shape[0]:]))
+        ln_theta_i = np.log(theta_i)
+
         if self.verbose:
             print('BSC: run() called with annotation matrix with shape = %s' % str(C.shape))
 
@@ -221,7 +248,14 @@ class BC(object):
                     print("BC iteration %i: computed label probabilities" % self.iter)
 
                 # Update label model and word feature distributions
-                ln_feature_likelihood = self._update_features()
+                #ln_feature_likelihood = self._update_features()
+                if self.iter != 0:
+                    classifier.fit(classifier_features, self.Et, validation_data=(x_val, y_val),
+                                   callbacks=[monitor], verbose=0, epochs=100, batch_size=4)
+                    theta_i = classifier.predict(classifier_features)
+                    theta_i = np.concatenate((y_train, theta_i[y_train.shape[0]:]))
+                    ln_theta_i = np.log(theta_i)
+                ln_feature_likelihood = ln_theta_i.copy()
                 self.LM.update_B(features, ln_feature_likelihood)
                 if self.verbose:
                     print("BC iteration %i: updated label model" % self.iter)
@@ -263,7 +297,8 @@ class BC(object):
                 print("BC iteration %i: computing most likely labels..." % self.iter)
             self.Et = self.LM.update_t(parallel, self.C_data)  # update t here so that we get the latest C_data and Et
             # values when computing most likely sequence and when returning Et
-            plabels, labels = self.LM.most_likely_labels(self._feature_ll(self.features))
+            #plabels, labels = self.LM.most_likely_labels(self._feature_ll(self.features))
+            plabels, labels = self.LM.most_likely_labels(ln_theta_i)
 
         if self.verbose:
             print("BC iteration %i: fitting/predicting complete." % self.iter)
