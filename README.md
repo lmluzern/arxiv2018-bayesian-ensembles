@@ -1,3 +1,8 @@
+To reproduce experiments, use src/experiments.py (main). Installation and requirements are introduced below. Additional requirements due to our modifications are:
+   * keras 2.3.1
+   * tensorflow 2.3.1
+   * scikit-learn 0.24.1
+
 # Bayesian Combination
 
 ## Contents
